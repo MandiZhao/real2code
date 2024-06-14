@@ -3,6 +3,8 @@
 
 [Arxiv](https://arxiv.org/abs/2406.08474) | [Website](https://real2code.github.io/)
 
+ 
+<img src="real2code-teaser-pic.jpg" alt="teaser" width="800"/>
 
 ## Installation
 Use conda environment with Python 3.9, and install packages from the provided `.yaml` file
