@@ -1,8 +1,8 @@
 from __future__ import annotations
-import mujoco
-from dm_control import mjcf 
-from mujoco import viewer
-from dm_control import mujoco as dm_mujoco 
+# import mujoco
+# from dm_control import mjcf 
+# from mujoco import viewer
+# from dm_control import mujoco as dm_mujoco 
 import os
 from os.path import join
 from glob import glob
@@ -35,8 +35,8 @@ from torchvision.transforms.functional import crop as tvf_crop
 from torchvision.transforms.functional import resize as tvf_resize
 from torchvision.transforms import Compose, ColorJitter, ToTensor, Normalize, RandomCrop 
 from datetime import datetime
-from image_segmentation.sam_to_pcd import load_blender_data
-from image_segmentation.tune_sam import SamH5Dataset, get_image_transform, forward_sam, forward_sam_points, get_wandb_table, reset_decoder_head 
+from part_segmentation.sam_to_pcd import load_blender_data
+from part_segmentation.finetune_sam import SamH5Dataset, get_image_transform, forward_sam, forward_sam_points, get_wandb_table
 import seaborn as sns
 import open3d as o3d
 CKPT_PATH="/home/mandi/sam_vit_h_4b8939.pth"
@@ -81,10 +81,7 @@ def load_sam_model(
         ckpt_name = "ckpt_zero_shot.pth"
     model = sam_model_registry[sam_type](checkpoint=CKPT_PATH)
     print("Original SAM Model loaded.")
-    forward_fn = forward_sam_points if points else forward_sam
-    if not points:
-        print("Resetting decoder head to 9 classes")
-        reset_decoder_head(model, new_size=9)
+    forward_fn = forward_sam_points if points else forward_sam 
     
     if not zero_shot:
         loaded_decoder = torch.load(ckpt_name, map_location="cpu")
@@ -383,7 +380,8 @@ def multimask_nms_filter(masks_ls, iou_thres=0.7):
     return d_pool, d_pool_idxs
 
 def get_one_tsdf(
-        rgbs, depths, cam_intrinsics, extrinsics, h=100, w=100, vlength=0.01, trunc=0.02,
+        rgbs, depths, cam_intrinsics, extrinsics, 
+        h=100, w=100, vlength=0.01, trunc=0.02,
         return_info=False,
         ):
     """ 
@@ -414,7 +412,8 @@ def get_one_tsdf(
 
 def sample_3d_eval(
         model, device, images, h5_fnames, labels, save_path, 
-        num_points=10, original_size=(512, 512), num_masks_per_batch=128, overwrite=False):
+        num_points=10, original_size=(512, 512), num_masks_per_batch=128, overwrite=False
+    ):
     """ 
     First get a background mask from coarsely sample query points, then, sample 3D points from the foreground masked object.
     Project each 3D points to 2D on each camera view image, then group the mask predictions across all 2D images for that point.
@@ -1050,6 +1049,7 @@ def load_3d(args, load_model_fname, filenames):
 
 def main(args): 
     if args.load_eval:
+        print("Loading eval result data")
         _, _, _, load_model_fname = load_sam_model(
             zero_shot=args.zero_shot,
             run_name=args.run_name,
@@ -1073,26 +1073,19 @@ def main(args):
             skip_load=True
             )
     # load dataset
-    original_size = (480, 480) 
-    if args.blender:
-        original_size = (640, 640)
-        if "_v2" in args.data_dir or "_v3" in args.data_dir:
-            original_size = (512, 512)
-        val_dataset = SamH5Dataset(
-            args.data_dir,
-            loop_id=args.loop_id,
-            subsample_camera_views=args.subsample_camera_views,
-            transform=get_image_transform(1024, jitter=False, random_crop=False), 
-            is_train=0,
-            point_mode=args.points,
-            original_img_size=original_size,
-            prompts_per_mask=16,
-            max_background_masks=2,
-            return_gt_masks=True,
-            )
-    else:
-        val_dataset = MobilityDataset(
-            args.data_dir, transform=get_image_transform(1024, jitter=False, random_crop=False), is_train=0)
+    original_size = (512, 512) 
+    val_dataset = SamH5Dataset(
+        args.data_dir,
+        loop_id=args.loop_id,
+        subsample_camera_views=args.subsample_camera_views,
+        transform=get_image_transform(1024, jitter=False, random_crop=False), 
+        is_train=0,
+        point_mode=True,
+        original_img_size=original_size,
+        prompts_per_mask=16,
+        max_background_masks=2,
+        return_gt_masks=True,
+        ) 
     val_loader = DataLoader(
         val_dataset, 
         batch_size=args.batch_size, 
@@ -1101,59 +1094,30 @@ def main(args):
         ) 
 
     with torch.no_grad():
-        for i, batch in enumerate(tqdm(val_loader)):  
-            if args.points and args.blender:
-                image = batch["image"].to(device)
-                save_path = join(args.output_dir, args.run_name,  load_model_fname.split("/")[-1], f"batch_{i}")
-                os.makedirs(save_path, exist_ok=True) 
-                outputs = sample_points_eval(
-                    model=model, 
-                    device=device, 
-                    image=image, 
-                    labels=batch["gt_masks"].detach().cpu().numpy(),
-                    save_path=save_path,
-                    num_grid_points=args.num_grid_points,
-                    original_size=original_size,
-                    )
-                # if i == 8:
-                #     break 
-            else:
-                labels = batch["masks"]
-                # try predictor
-                mask_generator = SamAutomaticMaskGenerator(model)
-                img = batch["image"][0] 
-                img = np.array(img.cpu().permute(1,2,0), dtype=np.uint8)
-                Image.fromarray(img).save("test_rgb.png")
-                mask_generator.pred_iou_thresh = 0.4
-                mask_generator.stability_score_thresh = 0.5
-                mask_generator.box_nms_thresh = 0.3
-                mask_generator.min_area = 0.01
-                mask_preds = mask_generator.generate(img)
-                print("masks", len(mask_preds))
-                for i, mask_data in enumerate(mask_preds):
-                    mask = mask_data["segmentation"]
-                    score = mask_data["stability_score"]
-                    predicted_iou = mask_data["predicted_iou"]
-                    mask_fname = join(
-                        # output_path, 
-                        f"pred_{i}_score-{score:.2f}_iou-{predicted_iou:.2f}.png")
-                    Image.fromarray(mask).save(mask_fname)
-
-                
-                outputs = forward_fn(model, batch, device)
-                print('pred', preds.max(), preds.min())
-                print('label', labels.max(), labels.min())
-                table = get_wandb_table(batch, preds, mask_threshold=0, softmax=False)
-                # wandb.log(
+        for i, batch in enumerate(tqdm(val_loader)):   
+            image = batch["image"].to(device)
+            save_path = join(args.output_dir, args.run_name,  load_model_fname.split("/")[-1], f"batch_{i}")
+            os.makedirs(save_path, exist_ok=True) 
+            outputs = sample_points_eval(
+                model=model, 
+                device=device, 
+                image=image, 
+                labels=batch["gt_masks"].detach().cpu().numpy(),
+                save_path=save_path,
+                num_grid_points=args.num_grid_points,
+                original_size=original_size,
+                )
+            # if i == 8:
+            #     break  
     breakpoint()
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--data_dir", type=str, default="/local/real/mandi/blender_dataset_v3") 
-    parser.add_argument("--model_dir", type=str, default="/local/real/mandi/sam_models")
-    parser.add_argument("--output_dir", type=str, default="/local/real/mandi/sam_eval") # save eval outputs
-    parser.add_argument("--sam_type", default="default", type=str)
-    parser.add_argument("--skip_load","-sl", action="store_true")
+    parser.add_argument("--data_dir", type=str, default="/store/real/mandi/real2code_dataset_v0") 
+    parser.add_argument("--model_dir", type=str, default="/store/real/mandi/sam_models")
+    parser.add_argument("--output_dir", type=str, default="/store/real/mandi/sam_eval") # save eval outputs
+    parser.add_argument("--sam_type", default="default", type=str) # from the original SAMv1 release
+    parser.add_argument("--skip_load","-sl", action="store_true") # skip loading the model for faster testing
     parser.add_argument("--loop_id", default=-1, type=int)
     parser.add_argument("--subsample_camera_views", "-sub", type=int, default=-1)
     parser.add_argument("--run_name", "-rn", default="use_pts_pointsTrue_lr0.0003_bs8_gradstep16_10-10_18-43", type=str)
@@ -1166,15 +1130,7 @@ if __name__ == "__main__":
     parser.add_argument("--vis_freq", default=100, type=int)
     parser.add_argument("--save_freq", default=500, type=int)
     parser.add_argument("--load_epoch", default=-1, type=int)
-    parser.add_argument("--load_steps", default=-1, type=int)
-    parser.add_argument("--points", action="store_true") 
-    parser.add_argument("--seg_3d", action="store_true") # if True, load a single object and run SAM to project
-    parser.add_argument("--blender", action="store_true") 
-    parser.add_argument("--object_folder", "-of", default="StorageFurniture/41003", type=str)
-    parser.add_argument("--input_xml_fname", default="merged_v1.xml", type=str)
-    parser.add_argument("--num_render_cameras", default=10, type=int)
-    parser.add_argument("--height", default=480, type=int)
-    parser.add_argument("--width", default=480, type=int)
+    parser.add_argument("--load_steps", default=-1, type=int)   
     parser.add_argument("--overwrite", "-o", action="store_true") # if True, overwrite existing output folder
     parser.add_argument("--num_grid_points", "-ng", default=32, type=int) # number of grid points to sample
     parser.add_argument("--load_eval", action="store_true") # if True, load eval data and save to wandb

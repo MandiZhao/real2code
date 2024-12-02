@@ -19,7 +19,7 @@ import h5py
 import torch
 from copy import deepcopy
 
-from data_utils import get_tight_obb as get_handcraft_obb
+# from data_utils import get_tight_obb as get_handcraft_obb
 
 """
 Generate input and target complete pcds 
@@ -37,7 +37,95 @@ RAW_MESH_ORIGIN = torch.tensor([-1,-1,-1])[None]
 RAW_MESH_SCALE = torch.tensor([2,2,2])[None]
 
 SPECIAL_IDS=[46859,46874,]
-   
+
+def obb_from_axis(points: np.ndarray, axis_idx: int):
+    """get the oriented bounding box from a set of points and a pre-defined axis"""
+    # Compute the centroid, points shape: (N, 3)
+    centroid = np.mean(points, axis=0)
+    # Align points with the fixed axis idx ([1, 0, 0]), so ignore x-coordinates
+    if axis_idx == 0:
+        points_aligned = points[:, 1:]
+        axis_1 = np.array([1, 0, 0])
+    elif axis_idx == 1:
+        points_aligned = points[:, [0, 2]]
+        axis_1 = np.array([0, 1, 0])
+    elif axis_idx == 2:
+        points_aligned = points[:, :2]
+        axis_1 = np.array([0, 0, 1])
+    else:  
+        raise ValueError(f"axis_idx {axis_idx} not supported!") 
+
+    # Compute PCA on the aligned points
+    points_centered = points_aligned - np.mean(points_aligned, axis=0)  
+    cov = np.cov(points_centered.T)
+    _, vh = np.linalg.eig(cov)
+    axis_2, axis_3 = vh[:, 0], vh[:, 1] # 2D!!
+    # axis_2, axis_3 = vh[0], vh[1] # 2D!! 
+    axis_2, axis_3 = np.round(axis_2, 1), np.round(axis_3, 1)  
+    x2, y2 = axis_2
+    x3, y3 = axis_3 
+    
+    if sum(axis_2 < 0) == 2 or (sum(axis_2 < 0) == 1 and sum(axis_2 == 0) == 1):
+        axis_2 = -axis_2
+    if sum(axis_3 < 0) == 2 or (sum(axis_3 < 0) == 1 and sum(axis_3 == 0) == 1):
+        axis_3 = -axis_3
+
+    # remove -0
+    axis_2 = np.array([0. if x == -0. else x for x in axis_2])
+    axis_3 = np.array([0. if x == -0. else x for x in axis_3]) 
+    if axis_idx == 0:
+        evec = np.array([
+            axis_1,
+            [0, axis_2[0], axis_2[1]],
+            [0, axis_3[0], axis_3[1]]
+            ]).T
+    elif axis_idx == 1:
+        evec = np.array([
+            [axis_2[0], 0, axis_2[1]],
+            axis_1,
+            [axis_3[0], 0, axis_3[1]]
+            ]).T 
+    elif axis_idx == 2:
+        evec = np.array([
+            [axis_2[0], axis_2[1], 0],
+            [axis_3[0], axis_3[1], 0],
+            axis_1,
+            ]).T 
+    # Use these axes to find the extents of the OBB
+    # # Project points onto these axes 
+    all_centered = points - centroid # (N, 3)
+    projection = all_centered @ evec # (N, 3) @ (3, 3) -> (N, 3)
+
+    # Find min and max projections to get the extents
+    _min = np.min(projection, axis=0)
+    _max = np.max(projection, axis=0)
+    extent = (_max - _min) # / 2 -> o3d takes full length
+    # Construct the OBB using the centroid, axes, and extents 
+ 
+    return dict(center=centroid, R=evec, extent=extent)
+
+def get_handcraft_obb(mesh, z_weight=1.5):
+    all_obbs = []
+    if isinstance(mesh, np.ndarray):
+        vertices = mesh    
+    else:
+        mesh.remove_unreferenced_vertices()
+        mesh.remove_degenerate_faces() 
+        vertices = np.array(mesh.vertices) 
+    if len(vertices) == 0:
+        return dict(center=np.zeros(3), R=np.eye(3), extent=np.ones(3))
+    for axis_idx in range(3):
+        obb_dict = obb_from_axis(vertices, axis_idx)
+        all_obbs.append(obb_dict)
+
+    # select obb with smallest volume, but prioritize axis z 
+    bbox_sizes = [np.prod(x['extent']) for x in all_obbs] 
+    bbox_sizes[2] /= z_weight # prioritize z axis 
+    min_size_idx  = np.argmin(bbox_sizes)
+    obb_dict = all_obbs[min_size_idx]
+    return obb_dict
+  
+
 def get_pcds(loop_dir, np_random, num_use_cameras=8, pcd_size=8000, remove_outlier=True, depth_trunc=10, vlength=0.01):
     """ return all the part-level PCDs """
     h5s = natsorted(glob(join(loop_dir, "*hdf5"))) 
@@ -158,70 +246,9 @@ def show_obb_pyplot(
     # close figure 
     plt.close(fig)
     return 
-
-def save_voxel_grid(args, voxel_size=96):
-    """ Load all the rotated mesh from shape dataset and save the voxel grid"""
-    if args.skip_extent:
-        print(f"Skipping extent normalization when saving voxel grid!")
-    lookup_path = join(args.data_dir, args.split, args.obj_type, args.obj_folder)
-    obj_folders = natsorted(glob(lookup_path))
-    print(f"Found {len(obj_folders)} objects for {args.obj_type} in {args.split} split.")
-    np_random = np.random.RandomState(args.np_seed)
-    for obj_folder in obj_folders:
-        print(f"Processing {obj_folder}")
-        obj_type = obj_folder.split("/")[-2]
-        obj_id = obj_folder.split("/")[-1]
-        out_path = join(args.out_dir, args.split, obj_type, obj_id)
-        loop_dirs = natsorted(glob(join(obj_folder, f"loop_{args.loop_id}")))
-        if len(loop_dirs) == 0:
-            print(f"No loop found for {obj_folder}")
-            continue
-
-        for loop_dir in loop_dirs:
-            loop_id = loop_dir.split("/")[-1]
-            out_dir = join(args.out_dir, args.split, obj_type, obj_id, loop_id)
-            
-            # rotate all the meshes
-            transforms_fname = join(loop_dir, "mesh_transforms.json")
-            assert os.path.exists(transforms_fname), f"{transforms_fname} does not exist"
-            mesh_transforms = json.load(open(transforms_fname, "r"))
-            
-            rotated_mesh_fnames = natsorted(glob(join(out_dir, "*_rot.obj")))
-            obb_fnames = natsorted(glob(join(out_dir, "obb_*.json"))) 
-            
-            for obj_fname in rotated_mesh_fnames:
-                link_name = obj_fname.split("/")[-1].split("_rot.obj")[0]
-                obb_fname = join(out_dir, f"obb_{link_name}.json")
-                obb_dict = json.load(open(obb_fname, "r"))
-                center = obb_dict['center']
-                extent = obb_dict['extent']
-                R = obb_dict['R']
-
-                center = torch.tensor(center)
-                extent = torch.tensor(extent)
-                R = torch.tensor(R)
-
-                mesh = import_mesh(obj_fname)
-                vertices, faces = mesh.vertices, mesh.faces
-                vertices = (vertices - center) @ R 
-                if not args.skip_extent:
-                    vertices = vertices / extent
-                    mesh_origin = torch.tensor([-0.5,-0.5,-0.5])[None].cuda()
-                    mesh_scale = torch.tensor([1,1,1])[None].cuda()
-                else:
-                    mesh_origin = RAW_MESH_ORIGIN.cuda()
-                    mesh_scale = RAW_MESH_SCALE.cuda()
-                voxelgrid = trianglemeshes_to_voxelgrids(
-                    vertices[None].cuda(), 
-                    faces.cuda(), voxel_size, origin=mesh_origin, scale=mesh_scale)
-                grid_fname = join(out_dir, f"{link_name}_grid_norm_{voxel_size}.pt")
-                if args.skip_extent:
-                    grid_fname = join(out_dir, f"{link_name}_grid_norm_{voxel_size}_noextent.pt")
-                torch.save(voxelgrid, grid_fname)
-    return
-
+ 
 def save_occupancy(args, voxel_size=96, use_aabb=False):
-    """ Load all the rotated mesh from shape dataset and get occupancy via sdf"""
+    """ Load all the rotated mesh from shape dataset, first get voxel grid from the mesh, then fill _inside_ the voxels to get occupancy grid"""
     lookup_path = join(args.data_dir, args.split, args.obj_type, args.obj_folder)
     obj_folders = natsorted(glob(lookup_path))
     print(f"Found {len(obj_folders)} objects for {args.obj_type} in {args.split} split.")
@@ -358,7 +385,6 @@ def save_pcds(args):
                 np.savez(pcd_fname, points=np.array(pcd.points), colors=np.array(pcd.colors))
                 
         
-
 def main(args):
     lookup_path = join(args.data_dir, args.split, args.obj_type, args.obj_folder)
     obj_folders = natsorted(glob(lookup_path))
@@ -416,7 +442,7 @@ def main(args):
                         mesh.apply_transform(np.array(mesh_transforms[link_name])[0])
                     mesh.export(new_fname) 
                     rotated_meshes[link_name] = new_fname
-                    obb_dict = get_tight_obb(mesh) 
+                    obb_dict = get_handcraft_obb(mesh) 
                     obb_dict = {k: v.tolist() if isinstance(v, np.ndarray) else v for k, v in obb_dict.items()}
                     rotated_obbs[link_name] = obb_dict 
                     
@@ -526,20 +552,15 @@ if __name__ == "__main__":
     parser.add_argument("--out_dir", type=str, default="/local/real/mandi/shape_dataset_v4/")
     parser.add_argument("--vis_dir", type=str, default="/local/real/mandi/shape_dataset_v4/vis")
     parser.add_argument("--overwrite", "-o", action="store_true")
-    parser.add_argument("--pcd_only", action="store_true")
-    parser.add_argument("--voxel_grid", action="store_true")
+    parser.add_argument("--pcd_only", action="store_true") 
     parser.add_argument("--skip_extent", action="store_true")
     parser.add_argument("--occupancy", "-occ", action="store_true")
     parser.add_argument("--use_aabb", action="store_true")
-    args = parser.parse_args()
-    if args.voxel_grid:
-        save_voxel_grid(args, 96)
-        exit()
+    args = parser.parse_args() 
     if args.occupancy:
         save_occupancy(args, 96, use_aabb=args.use_aabb)
         exit()
     if args.pcd_only:
         save_pcds(args)
         exit()
-
     main(args)

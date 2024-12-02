@@ -55,6 +55,7 @@ class SamH5Dataset(Dataset):
         filter_masks=True,
         topcrop=0,
         bottomcrop=0,
+        rebuttal_objects_only=False, # if True, only use Scissors Eyeglasses
     ):
         self.root_dir = root_dir
         self.transform = transform
@@ -64,7 +65,8 @@ class SamH5Dataset(Dataset):
         self.filter_masks = filter_masks
         self.filenames, self.object_ids, self.filename_to_nmask, self.obj_to_nmask = \
             self.load_filenames(
-                root_dir, is_train, split, subsample_camera_views, obj_type, obj_folder, loop_id
+                root_dir, is_train, split, subsample_camera_views, obj_type, obj_folder, loop_id,
+                rebuttal_objects_only=rebuttal_objects_only
                 )
         self.num_masks = num_masks
         self.point_mode = point_mode
@@ -117,7 +119,12 @@ class SamH5Dataset(Dataset):
             root_dir, 
             is_train=True, 
             split=0.9, 
-            subsample_camera_views=-1, lookup_obj_type="*", lookup_obj_folder="*", loop_id=-1):
+            subsample_camera_views=-1, 
+            lookup_obj_type="*", 
+            lookup_obj_folder="*", 
+            loop_id=-1,
+            rebuttal_objects_only=False
+        ):
         """ 
         load each loop's hdf5 files, assume data ataset_v0)
             - StorageFurniture
@@ -142,6 +149,8 @@ class SamH5Dataset(Dataset):
         for obj_type in natsorted(os.listdir(root_dir)):
             if lookup_obj_type != "*" and obj_type != lookup_obj_type:
                 continue 
+            if rebuttal_objects_only and obj_type not in ['Scissors', 'Eyeglasses']:
+                continue
             obj_filenames = defaultdict(list)
             for obj_folder in natsorted(os.listdir(join(root_dir, obj_type))):
                 if lookup_obj_folder != "*" and obj_folder != lookup_obj_folder:
@@ -403,9 +412,9 @@ class SamH5Dataset(Dataset):
         obj_weights = np.array(num_masks) / np.sum(num_masks)
         return obj_weights
     
-if __name__ == "__main__":
-    from tune_sam import get_image_transform, forward_sam, forward_sam_points, get_loss_fn, get_wandb_table, reset_decoder_head
-    transform_fn = get_image_transform(1024, jitter=False, random_crop=False)
+# if __name__ == "__main__":
+    # from finetune_sam import get_image_transform, forward_sam, forward_sam_points, get_loss_fn, get_wandb_table, reset_decoder_head
+    # transform_fn = get_image_transform(1024, jitter=False, random_crop=False)
     # dataset = SamH5Dataset(
     #     root_dir="/local/real/mandi/blender_dataset_v4", 
     #     transform=transform_fn,

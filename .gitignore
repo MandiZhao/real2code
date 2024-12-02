@@ -1,0 +1,4 @@
+wandb/
+*.pyc
+*/*/*.pyc
+*/__pycache__

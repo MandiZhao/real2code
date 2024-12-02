@@ -24,14 +24,14 @@ from torchvision.transforms import Compose, ColorJitter, ToTensor, Normalize, Ra
 from datetime import datetime
 import torch.nn.functional as F
 from einops import rearrange, repeat
-from image_segmentation.sam_datasets import SamH5Dataset
+from part_segmentation.sam_datasets import SamH5Dataset
 from torch.nn import DataParallel
 """
 use blender dataset:
 python tune_sam.py --blender --run_name blender_min_loss --min_loss --wandb --data_dir /local/real/mandi/blender_dataset_v0
 
 v2:
-python tune_sam.py --blender --run_name sam_v2 --wandb --data_dir /local/real/mandi/blender_dataset_v2 --points --prompts_per_mask 16 --lr 1e-3 --wandb --fc_weight 1
+python tune_sam.py --blender --run_name sam_v2 --wandb --data_dir /local/real/mandi/blender_dataset_v2 --prompts_per_mask 16 --lr 1e-3 --wandb --fc_weight 1
 """
 
 CKPT_PATH="/home/mandi/sam_vit_h_4b8939.pth"
@@ -80,32 +80,6 @@ class PointsQueryMixin(nn.Module):
         for k in all_outputs[0].keys():
             stack_outputs[k] = torch.stack([o[k] for o in all_outputs], dim=0).squeeze(2)
         return stack_outputs
-
-def reset_decoder_head(model, new_size=9):
-    """ given a sam model, add new layers to its mask_decoder to output a different number of masks at once """
-    decoder = model.mask_decoder
-    print(f"Current # of multi-mask outputs: {decoder.num_multimask_outputs}")
-    assert new_size > decoder.num_multimask_outputs, "new_size must be greater than current # of multi-mask outputs"
-    decoder.num_multimask_outputs = new_size
-    decoder.num_mask_tokens = new_size + 1
-    decoder.mask_tokens = nn.Embedding(decoder.num_mask_tokens, decoder.transformer_dim)    
-    new_hypernet_mlps = []
-    num_old_mlps = len(decoder.output_hypernetworks_mlps)
-    while len(new_hypernet_mlps) != new_size + 1:
-        size_diff = (new_size + 1) - len(new_hypernet_mlps)
-        new_hypernet_mlps.extend(
-                [deepcopy(module) for module in decoder.output_hypernetworks_mlps[:size_diff]]
-        )
-    decoder.output_hypernetworks_mlps = nn.ModuleList(new_hypernet_mlps)
-    old_iou_head = decoder.iou_prediction_head
-    iou_hidden = old_iou_head.hidden_dim
-
-    decoder.iou_prediction_head = MaskDecoderMLP(
-        decoder.transformer_dim, hidden_dim=iou_hidden, output_dim=decoder.num_mask_tokens, num_layers=old_iou_head.num_layers
-    )
-    for p in decoder.parameters():
-        p.requires_grad_(True)
-    print(f"Done reseting, new # of multi-mask outputs: {decoder.num_multimask_outputs}")
 
 def get_image_transform(model_img_size, jitter=True, random_crop=True, center_crop=False, pad=False):
     
@@ -364,21 +338,19 @@ def main(args):
     forward_fn = forward_sam
     dataset_kwargs = dict(
         root_dir=args.data_dir, 
+        rebuttal_objects_only=args.rebuttal_objects,
     )
     forward_fn = forward_sam_points
     dataset_kwargs["prompts_per_mask"] = args.prompts_per_mask
     dataset_cls = SamH5Dataset
-    original_size = (640, 640)
-    if 'v1' not in args.data_dir:
-        original_size = (512, 512)
-    if args.points:
-        dataset_kwargs['point_mode'] = True
-        dataset_kwargs['grid_size'] = args.grid_size
-        dataset_kwargs['max_background_masks'] = args.max_bg
-        dataset_kwargs['use_cache'] = args.cache
-        # if args.cache:
-        #     assert args.num_data_workers == 0, "num_data_workers must be 0 when using cache"
-        #     print('Using cache and repeated rgb for training dataset only')
+    original_size = (512, 512)
+    dataset_kwargs['point_mode'] = True
+    dataset_kwargs['grid_size'] = args.grid_size
+    dataset_kwargs['max_background_masks'] = args.max_bg
+    dataset_kwargs['use_cache'] = args.cache
+    # if args.cache:
+    #     assert args.num_data_workers == 0, "num_data_workers must be 0 when using cache"
+    #     print('Using cache and repeated rgb for training dataset only')
     dataset = dataset_cls(
         **dataset_kwargs,
         transform=get_image_transform(1024, jitter=True, random_crop=True), 
@@ -409,7 +381,7 @@ def main(args):
         val_dataset, batch_size=args.batch_size, shuffle=False, num_workers=args.num_data_workers)
 
 
-    run_name = f"{args.run_name}_points{args.points}_lr{args.lr}_bs{args.batch_size}_ac{args.grad_accum_steps}"
+    run_name = f"{args.run_name}_pointsTrue_lr{args.lr}_bs{args.batch_size}_ac{args.grad_accum_steps}"
     run_name += f"_{datetime.now().strftime('%m-%d_%H-%M')}"
     run_dir = join(args.output_dir, run_name)
     os.makedirs(run_dir, exist_ok=False)
@@ -422,10 +394,7 @@ def main(args):
     for name, param in model.named_parameters():
         if name.startswith("image_encoder") or name.startswith("prompt_encoder"):
             param.requires_grad_(False)
-    print("Model loaded, try reset head")
-    if not args.points:
-        print("Resetting head")
-        reset_decoder_head(model, new_size=9)
+    print("Model loaded, try reset head") 
 
     extend_instance(model, PointsQueryMixin)
     trainable = sum([p.numel() for p in model.parameters() if p.requires_grad])
@@ -525,31 +494,31 @@ def main(args):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--data_dir", type=str, default="/local/real/mandi/blender_dataset_v4")
-    parser.add_argument("--output_dir", type=str, default="/local/real/mandi/sam_models")    
+    parser.add_argument("--output_dir", type=str, default="/store/real/mandi/sam_models")    
     parser.add_argument("--load_run", type=str, default="")
     parser.add_argument("--load_epoch", type=int, default=-1)
     parser.add_argument("--sam_type", default="default", type=str)
     parser.add_argument("--skip_load","-sl", action="store_true") 
     parser.add_argument("--run_name", "-rn", default="sam_tune", type=str)
-    parser.add_argument("--epochs", default=20, type=int)
-    parser.add_argument("--lr", default=3e-4, type=float)
-    parser.add_argument("--batch_size", "-bs", default=8, type=int)
+    parser.add_argument("--epochs", default=300, type=int)
+    parser.add_argument("--lr", default=1e-3, type=float)
+    parser.add_argument("--batch_size", "-bs", default=24, type=int)
     parser.add_argument("--wandb", action="store_true")
-    parser.add_argument("--grad_accum_steps", "-ac", default=16, type=int)
-    parser.add_argument("--log_freq", default=250, type=int)
+    parser.add_argument("--grad_accum_steps", "-ac", default=12, type=int)
+    parser.add_argument("--log_freq", default=100, type=int)
     parser.add_argument("--vis_freq", default=2000, type=int)
-    parser.add_argument("--save_freq", default=2000, type=int)
-    parser.add_argument("--fc_weight", default=1, type=int)
-    parser.add_argument("--points", default=True, action="store_true")
+    parser.add_argument("--save_freq", default=500, type=int)
+    parser.add_argument("--fc_weight", default=1, type=int) 
     parser.add_argument("--prompts_per_mask", type=int, default=16)
     parser.add_argument("--num_data_workers", type=int, default=0)
     parser.add_argument("--blender", default=True, action="store_true")
     parser.add_argument("--min_loss", action="store_true")
     parser.add_argument("--grid_size", type=int, default=1)
-    parser.add_argument("--max_bg", type=int, default=4)
+    parser.add_argument("--max_bg", type=int, default=3)
     parser.add_argument("--cache", action="store_true")
     parser.add_argument("--weight_sample", action="store_true")
     parser.add_argument("--use_dp", action="store_true")
     parser.add_argument("--dp_devices", '-dp', type=int, default=2)
+    parser.add_argument("--rebuttal_objects", action="store_true")
     args = parser.parse_args()
     main(args)

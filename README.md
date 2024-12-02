@@ -15,8 +15,14 @@ conda env update --file environment.yml --prune
 
 ## Code Overview
 ### Data Generation & Processing  
-Use `blender_render.py` to process and render RGBD images from [PartNet-Mobility](https://sapien.ucsd.edu/browse) data. 
-Use `preprocess_data.py` to generate OBB-relative MJCF code data from the raw URDFs for LLM fine-tuning.  
+1. Download the pre-processed version of PartNet-Mobility data from [UMPNet](https://github.com/real-stanford/umpnet) and from the [Sapien official website](https://sapien.ucsd.edu/browse) (this website has web-based interactive visualization for the objects). 
+Note that the objects were manually inspected and de-duplicated: for Eyeglasses category, 11 objects from the original site was removed, and results in 54 objects in total, from which we selected 5 test objects.
+
+2. Use `blender_render.py` to process and render RGBD images from [PartNet-Mobility](https://sapien.ucsd.edu/browse) data. 
+  - If you see error `xcb_connection_has_error() returned true`, try unsetting `DISPLAY` variable (e.g. `export DISPLAY=`).
+
+3. Use `preprocess_data.py` to generate OBB-relative MJCF code data from the raw URDFs for LLM fine-tuning.  
+
 See `data_utils/` for detailed implementations of the helper functions. 
 
 ### Kinematics-Aware SAM Fine-tuning 

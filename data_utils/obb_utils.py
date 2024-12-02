@@ -1,6 +1,4 @@
-import os
-import mujoco 
-from dm_control import mujoco as dm_mujoco
+import os 
 import open3d as o3d
 import numpy as np
 from os.path import join

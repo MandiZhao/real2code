@@ -40,8 +40,8 @@ for FOLDER in 40417 44781 44817 44853 44962 45243 45248 45271 45332 45423 45505 
 NUM_LIGHTS = 6
 CAM_DISTANCE = 4 #5 
 CAM_HEIGHT = 0.1 # 0.7 # NOTE: manually set this because bproc.object.compute_poi() seems to always get a lower height
-POI_RANGE_LOW = np.array([-0.2, -0.2, 0])
-POI_RANGE_HIGH = np.array([-0.1, -0.1, CAM_HEIGHT]) # shift it back because many drawers are open forward!
+# POI_RANGE_LOW = np.array([-0.2, -0.2, 0])
+# POI_RANGE_HIGH = np.array([-0.1, -0.1, CAM_HEIGHT]) # shift it back because many drawers are open forward!
 
 CAM_ROTATION_MAX = 3*np.pi/2 - np.pi/6
 CAM_ROTATION_MIN = np.pi/2 + np.pi/8
@@ -53,6 +53,11 @@ RENDER_HEIGHT = 512
 RENDER_DEPTH = True
 DEPTH_KINECT_NOISE = False
 RENDER_NORMALS = False
+
+CUSTOM_CAMERA_DIST_HEIGHT={
+    "Eyeglasses": [2.8, 0.85],
+    "Scissors": [3.5, 1.5],
+}
   
 from mathutils import Euler
 import bpy
@@ -298,7 +303,7 @@ def save_render_data(data, camera_infos, output_path, save_mask_png=False, try_l
 
 def resample_cameras(
         num_frames, full_circle=False, np_random=np.random.RandomState(0), cam_distance=CAM_DISTANCE, 
-        cam_height=CAM_HEIGHT, obj_center=POI_RANGE_HIGH, rotation_min=CAM_ROTATION_MIN, rotation_max=CAM_ROTATION_MAX
+        cam_height=CAM_HEIGHT, obj_center=np.array([0,0,0]), rotation_min=CAM_ROTATION_MIN, rotation_max=CAM_ROTATION_MAX
         ):
     # camera will look towards this point of interest
     # poi = bproc.object.compute_poi(obj.links[1].get_visuals()) # seems unreliable
@@ -460,9 +465,14 @@ def process_folder(args, folder):
         cam_dist, cam_height = 3.9, 0.6
     else: 
         cam_dist, cam_height = 3.7, 0.7
+
+    if obj_type in CUSTOM_CAMERA_DIST_HEIGHT:
+        print(f"Using custom camera dist and height for {obj_type}")
+        cam_dist, cam_height = CUSTOM_CAMERA_DIST_HEIGHT[obj_type]
     
     rotation_min, rotation_max = CAM_ROTATION_MIN, CAM_ROTATION_MAX
     jnt_margin = 0.1
+    joint_high = None
     if args.folder == '30666':
         cam_dist, cam_height = 3.6, 0.9
     if args.folder == "22367":
@@ -478,6 +488,10 @@ def process_folder(args, folder):
         rotation_min, rotation_max = np.pi/2 + np.pi/4, 3*np.pi/2 - np.pi/4
     if args.folder == "45662":
         jnt_margin = 0.9
+    if obj_type == "Eyeglasses":
+        print("Not bending the glasses joints too much")
+        jnt_margin = 0.1
+        joint_high = 0.2
     # breakpoint()
     print(f"\nobj center: {obj_center} obj volume: {obj_volume:.2f}, cam_dist: {cam_dist:.2f}, cam_height: {cam_height:.2f}\n")
     # breakpoint()
@@ -525,7 +539,7 @@ def process_folder(args, folder):
             print(f"skipping {output_folder}")
             continue
         
-        joint_rots = set_hinge_joints(obj, np_random, margin=jnt_margin)
+        joint_rots = set_hinge_joints(obj, np_random, margin=jnt_margin, high_margin=joint_high)
         # resample lights
         init_lights = resample_lights(NUM_LIGHTS, init_lights=init_lights, np_random=np_random)
         # resample cameras
