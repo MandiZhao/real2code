@@ -26,13 +26,6 @@ import torch.nn.functional as F
 from einops import rearrange, repeat
 from part_segmentation.sam_datasets import SamH5Dataset
 from torch.nn import DataParallel
-"""
-use blender dataset:
-python tune_sam.py --blender --run_name blender_min_loss --min_loss --wandb --data_dir /local/real/mandi/blender_dataset_v0
-
-v2:
-python tune_sam.py --blender --run_name sam_v2 --wandb --data_dir /local/real/mandi/blender_dataset_v2 --prompts_per_mask 16 --lr 1e-3 --wandb --fc_weight 1
-"""
 
 CKPT_PATH="/home/mandi/sam_vit_h_4b8939.pth"
 
@@ -493,7 +486,7 @@ def main(args):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--data_dir", type=str, default="/local/real/mandi/blender_dataset_v4")
+    parser.add_argument("--data_dir", type=str, default="/local/real/mandi/real2code_dataset_v0")
     parser.add_argument("--output_dir", type=str, default="/store/real/mandi/sam_models")    
     parser.add_argument("--load_run", type=str, default="")
     parser.add_argument("--load_epoch", type=int, default=-1)

@@ -12,13 +12,14 @@ from kaolin.metrics.trianglemesh import point_to_mesh_distance
 from kaolin.ops.conversions import trianglemeshes_to_voxelgrids, sdf_to_voxelgrids, voxelgrids_to_trianglemeshes
 import sys 
 sys.path.append("../real2code")
-from data_utils import get_tight_obb as obb_from_axis
+from shape_complete.datagen import get_handcraft_obb as obb_from_axis
 import torch
 from torch.utils.data import Dataset, DataLoader
 from matplotlib import pyplot as plt
 from time import time
 import wandb
 from einops import rearrange
+
 OBJ_FNAME = "*_rot.obj"
 RAW_MESH_ORIGIN = torch.tensor([-1,-1,-1])[None]
 RAW_MESH_SCALE = torch.tensor([2,2,2])[None]
@@ -145,6 +146,7 @@ class ShapeCompletionDataset(Dataset):
         pcd = np.load(pcd_fname)['points'] 
         raw_size = pcd.shape[0]
         pcd = torch.tensor(pcd, dtype=torch.float32).cuda()
+        raw_pcd = pcd.clone() # un-normalized pcd!
         if raw_size != self.input_size:
             sampled_idxs = torch.randint(0, raw_size, (self.input_size,)).cuda() 
             pcd = pcd[sampled_idxs]
@@ -156,7 +158,7 @@ class ShapeCompletionDataset(Dataset):
             if self.use_max_extents:
                 max_extent = torch.max(extents)
                 pcd = pcd / max_extent
-        return pcd
+        return raw_pcd, pcd
     
     def normalize_mesh_with_obb(self, vertices, faces, center, extents, R): 
         vertices = vertices - center 
@@ -282,7 +284,7 @@ class ShapeCompletionDataset(Dataset):
                 )
         if self.aug_obb:
             center, extent = aug_center, aug_extent
-        partial_pcd = self.get_input_pcd(mesh_info["pcd_fname"], center, extent, R) 
+        raw_pcd, partial_pcd = self.get_input_pcd(mesh_info["pcd_fname"], center, extent, R) 
         if self.rot_aug:
             # rotate pcd
             partial_pcd = partial_pcd @ aug_R.T.to(partial_pcd.device)
@@ -291,6 +293,7 @@ class ShapeCompletionDataset(Dataset):
             input=partial_pcd,
             label=labels,
             query=query_points, # shape (Q, 3) 
+            raw_pcd=raw_pcd,
         ) 
         return data
  
@@ -368,7 +371,7 @@ class ShapeCompletionEvalDataset(ShapeCompletionDataset):
                 scale=mesh_scale.cuda()
                 )
   
-        partial_pcd = self.get_input_pcd(mesh_info["pcd_fname"], center, extent, R) 
+        raw_pcd, partial_pcd = self.get_input_pcd(mesh_info["pcd_fname"], center, extent, R) 
          
         query_points, labels = self.get_all_query_points(voxelgrid[0]) # shape (Q, 3) 
  
@@ -380,6 +383,7 @@ class ShapeCompletionEvalDataset(ShapeCompletionDataset):
             R=R,
             center=center,
             extent=extent,
+            raw_pcd=raw_pcd,
         )
          
         return data

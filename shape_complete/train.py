@@ -15,7 +15,7 @@ from torch.utils.data import DataLoader
 from kaolin.ops.conversions import voxelgrids_to_trianglemeshes
 
 """
-python train.py --use_dp -dp 3 -rn v3table 
+python train.py --use_dp -dp 3 -rn scissors_eyeglasses --data_dir /store/real/mandi/real2code_shape_dataset_v0 --load_voxelgrid
 """
 
 def get_loss(model, pred, target):
@@ -149,7 +149,7 @@ def run(args):
     if args.use_dp:
         model = DataParallel(model, device_ids=[i for i in range(args.dp_devices)])
 
-    run_name = f"{args.run_name}_query{args.num_query_points}_inp{args.num_input_points}_qr{args.query_surface_ratio}"
+    run_name = f"{args.run_name}_query{args.num_query_points}_inp{args.num_input_points}_qr{args.query_surface_ratio}_bs{args.batch_size}_lr{args.learning_rate}"
 
     if args.wandb:
         run = wandb.init(project="real2code", group="shape", name=run_name)
@@ -226,10 +226,10 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     # dataset and loader:
     parser.add_argument("--data_dir", type=str, default="/local/real/mandi/shape_dataset_v4")
-    parser.add_argument("--batch_size", "-b", type=int, default=32)
+    parser.add_argument("--batch_size", "-b", type=int, default=96)
     parser.add_argument("--num_input_points", "-i", type=int, default=1024)
     parser.add_argument("--num_query_points", "-q", type=int, default=6000)
-    parser.add_argument("--query_surface_ratio", "-qr", type=float, default=0.5)
+    parser.add_argument("--query_surface_ratio", "-qr", type=float, default=0.2)
     parser.add_argument("--num_workers", "-w", type=int, default=0)
     parser.add_argument("--obj_type", type=str, default="*")    
     parser.add_argument("--obj_folder", type=str, default="*")  
@@ -256,9 +256,9 @@ if __name__ == "__main__":
     parser.add_argument("--resume", "-r", type=str, default=None)
     parser.add_argument("--load_step", "-ls", type=int, default=None)
     # logging:
-    parser.add_argument("--log_dir", "-ld", type=str, default="/local/real/mandi/shape_models/")
-    parser.add_argument("--log_interval", "-log", type=int, default=500)
-    parser.add_argument("--save_interval", "-save", type=int, default=5000)
+    parser.add_argument("--log_dir", "-ld", type=str, default="/store/real/mandi/real2code_shape_models/")
+    parser.add_argument("--log_interval", "-log", type=int, default=200)
+    parser.add_argument("--save_interval", "-save", type=int, default=2000)
     parser.add_argument("--wandb", action="store_true")
     parser.add_argument("--run_name", "-rn", type=str, default="test")
     parser.add_argument("--overwrite", "-o", action="store_true")

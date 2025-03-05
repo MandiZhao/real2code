@@ -126,7 +126,16 @@ def get_handcraft_obb(mesh, z_weight=1.5):
     return obb_dict
   
 
-def get_pcds(loop_dir, np_random, num_use_cameras=8, pcd_size=8000, remove_outlier=True, depth_trunc=10, vlength=0.01):
+def get_pcds(
+    loop_dir, 
+    np_random, 
+    num_use_cameras=8, 
+    pcd_size=8000, 
+    remove_outlier=True, 
+    depth_trunc=10, 
+    vlength=0.01,
+    return_masked_rgb=False, # return masked rgb for visualization
+    ):
     """ return all the part-level PCDs """
     h5s = natsorted(glob(join(loop_dir, "*hdf5"))) 
     # NOTE: some masks don't have all the parts due to partial occlusion!!
@@ -147,6 +156,9 @@ def get_pcds(loop_dir, np_random, num_use_cameras=8, pcd_size=8000, remove_outli
                 )
             for _ in range(max_num_masks - 1) # first mask is the background
         ]
+    # each pcd should correspond to a list of num_camera masked RGBs
+    masked_rgbs = [[] for _ in range(max_num_masks - 1)]
+    masked_depths = [[] for _ in range(max_num_masks - 1)]
     np_random.shuffle(h5s)
     used_cameras = 0
     for h5_file in h5s:
@@ -175,6 +187,9 @@ def get_pcds(loop_dir, np_random, num_use_cameras=8, pcd_size=8000, remove_outli
             rgb_copy[mask == 0] = 0
             depth_copy[mask == 0] = 0  
             
+            if return_masked_rgb:
+                masked_rgbs[idx].append(rgb_copy)
+                masked_depths[idx].append(depth_copy)
             rgbd = o3d.geometry.RGBDImage.create_from_color_and_depth(
                     o3d.geometry.Image(rgb_copy), 
                     o3d.geometry.Image(depth_copy),
@@ -196,17 +211,12 @@ def get_pcds(loop_dir, np_random, num_use_cameras=8, pcd_size=8000, remove_outli
         pcd = volume.extract_point_cloud()
         if remove_outlier:
             pcd, _ = pcd.remove_statistical_outlier(nb_neighbors=50, std_ratio=2.0)
-        if pcd_size > -1 and len(pcd.points) > pcd_size:
-            # print(f"Subsampling {len(pcd.points)} to {pcd_size}")
-            # subsampled_idxs = np_random.choice(len(pcd.points), pcd_size, replace=(len(pcd.points) < pcd_size))
-            # new_points = np.array(pcd.points)[subsampled_idxs]
-            # new_colors = np.array(pcd.colors)[subsampled_idxs]
-            # pcd.points = o3d.utility.Vector3dVector(new_points)
-            # pcd.colors = o3d.utility.Vector3dVector(new_colors)
-            # sample farther points
+        if pcd_size > -1 and len(pcd.points) > pcd_size: 
             pcd = pcd.farthest_point_down_sample(pcd_size) 
 
         pcds.append(pcd)
+    if return_masked_rgb:
+        return pcds, masked_rgbs, masked_depths
     
     return pcds
 
@@ -541,7 +551,7 @@ def main(args):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--data_dir", type=str, default="/local/real/mandi/blender_dataset_v4/")
+    parser.add_argument("--data_dir", type=str, default="/local/real/mandi/real2code_dataset_v0/")
     parser.add_argument("--obj_type", type=str, default="*")
     parser.add_argument("--obj_folder", type=str, default="*")
     parser.add_argument("--loop_id", type=str, default="*")
@@ -549,8 +559,8 @@ if __name__ == "__main__":
     parser.add_argument("--pcd_size", type=int, default=2048)
     parser.add_argument("--num_use_cameras", type=int, default=24)
     parser.add_argument("--split", type=str, default="test")
-    parser.add_argument("--out_dir", type=str, default="/local/real/mandi/shape_dataset_v4/")
-    parser.add_argument("--vis_dir", type=str, default="/local/real/mandi/shape_dataset_v4/vis")
+    parser.add_argument("--out_dir", type=str, default="/local/real/mandi/real2code_shape_dataset_v0/")
+    parser.add_argument("--vis_dir", type=str, default="/local/real/mandi/real2code_shape_dataset_v0/vis")
     parser.add_argument("--overwrite", "-o", action="store_true")
     parser.add_argument("--pcd_only", action="store_true") 
     parser.add_argument("--skip_extent", action="store_true")

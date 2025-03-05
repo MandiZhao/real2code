@@ -22,20 +22,86 @@ from glob import glob
 from natsort import natsorted
 # from pytorch3d.ops import sample_points_from_meshes
 # from pytorch3d.loss import chamfer_distance # pytorch3d is bugged
+from shape_complete.datagen import get_handcraft_obb
 import sys 
 sys.path.append("../real2code")
 
 """
-run model on all query points and extract mesh 
-latest model:
-RUN=occ_useEx_query6000_inp1024_qr0.25
-LS=50000
-python eval.py -r $RUN -ls $LS 
+run model on all query points and extract mesh  
 
-RUN=v4_query8000_inp1024_qr0.5
-LS=95000
-python eval.py -r $RUN -ls $LS
+RUN=scissors_eyeglasses_query6000_inp1024_qr0.2
+LS=28000
+python shape_complete/eval.py -r $RUN -ls $LS --save_mesh --obj_folder 10907
+
+# use SAM-generated seg pcd:
+RUN=scissors_eyeglasses_query6000_inp1024_qr0.2
+LS=28000
+python shape_complete/eval.py -r $RUN -ls $LS --save_mesh --obj_folder 101860 --eval_sam
+
+# eval with the older shape completion model
+python shape_complete/eval.py  -r v4_shiftidx_query12000_inp2048_qr0.25 -ls 165000 --log_dir /local/real/mandi/shape_models/ --obj_type Microwave
+# the SAM model is also different here
+python shape_complete/eval.py  -r v4_shiftidx_query12000_inp2048_qr0.25 -ls 165000 --log_dir /local/real/mandi/shape_models/ \
+    --obj_type Microwave --eval_sam     --sam_result_dir /store/real/mandi/real2code_eval_v0/rebuttal_full_pointsTrue_lr0.001_bs21_ac12_12-01_19-52/ckpt_step_11000 
+    
 """ 
+
+VOXEL_SIZE = 96
+def get_uniform_query_points(grid_size=VOXEL_SIZE):
+    """ sample query points uniformly """
+    all_grid_idxs = torch.arange(0, grid_size**3)
+    query_points = torch.tensor(np.array(np.unravel_index(all_grid_idxs, (grid_size, grid_size, grid_size))).T) 
+    query_points = query_points / grid_size # range [0, 1]
+    return query_points
+
+def normalize_pcd(pcd, center, extent, R):
+    return ((pcd - center) @ R) / extent
+
+def run_on_seg_data(model, obj_pcd_dir, merge_raw_pcd=False):
+    # e.g. /store/real/mandi/real2code_eval_v0/scissors_eyeglasses_only_pointsTrue_lr0.001_bs24_ac24_11-30_00-23/ckpt_epoch_110/Eyeglasses/101845/loop_0/filled_pcd_0.ply
+    pcd_fnames = natsorted(glob(join(obj_pcd_dir, "filled*.ply")))
+    query_pts = get_uniform_query_points().cuda()[None]
+    results = []
+    for fname in pcd_fnames:
+        pcd = o3d.io.read_point_cloud(fname)
+        raw_pcd = np.array(pcd.points)  
+        obb = get_handcraft_obb(raw_pcd)  
+        extent = obb['extent'] * 1.5 # add margin! 
+        center = obb['center']
+        R = obb['R']
+
+        raw_pcd = normalize_pcd(raw_pcd, center, extent, R)
+        input_pcd = raw_pcd.copy()
+
+         # normalize input pcd: 
+        input_pcd = torch.from_numpy(input_pcd).float().cuda()[None]
+        # run shape completion
+        with torch.no_grad():
+            pred = model(input_pcd, query_pts)
+        logits = torch.sigmoid(pred).detach()
+        mesh_origin = np.array([-0.5, -0.5, -0.5])
+        pred_voxelgrid = rearrange(logits, 'b (x y z) -> b x y z', x=VOXEL_SIZE, y=VOXEL_SIZE, z=VOXEL_SIZE)
+        # add the input pcd to the voxelgrid??
+        if merge_raw_pcd:
+            input_voxelgrid = pointclouds_to_voxelgrids(
+                input_pcd, resolution=VOXEL_SIZE, 
+                origin=torch.tensor(mesh_origin)[None].cuda(), 
+                scale=torch.ones(3)[None].cuda()
+            )
+            pred_voxelgrid += input_voxelgrid
+        # extract mesh
+        verts, faces = voxelgrids_to_trianglemeshes(pred_voxelgrid, iso_value=0.7)
+        vertices = verts[0].cpu().numpy()
+        faces = faces[0].cpu().numpy()
+        vertices = vertices / VOXEL_SIZE + mesh_origin
+        vertices = vertices * extent  
+        vertices = vertices @ R.T + center
+
+        save_fname = fname.replace("filled_pcd", "pred_mesh").replace(".ply", ".obj")
+        results.append((fname, save_fname, vertices, faces))
+    return results
+
+
 def points_chamfer_distance(points1, points2, num_points=100000):
      # one direction
     tree1 = KDTree(points1)
@@ -83,10 +149,13 @@ def create_dataset(args_fname, args):
         dataset_kwargs = json.load(f)['dataset_kwargs']
     print(f"Loaded dataset kwargs: {dataset_kwargs}")
     # setup dataset and loader 
+    dataset_kwargs['data_dir'] = args.data_dir
     dataset_kwargs['split'] = args.split 
     dataset_kwargs['obj_type'] = args.obj_type
     dataset_kwargs['obj_folder'] = args.obj_folder
-    dataset_kwargs['loop_dir'] = "0"
+    dataset_kwargs['query_size'] = args.num_query_points
+    dataset_kwargs['query_surface_ratio'] = args.query_surface_ratio
+    dataset_kwargs['loop_dir'] = str(args.loop_dir)
 
     skip_extents = dataset_kwargs.get('skip_extents', False)
     use_max_extents = dataset_kwargs.get('use_max_extents', False)
@@ -104,13 +173,7 @@ def get_link_name(mesh_fname):
 def run(args):
     args_fname = join(args.log_dir, args.resume, "args.json")
     assert os.path.exists(args_fname), f"Args file {args_fname} does not exist"
-    val_dataset, skip_extents, use_max_extents = create_dataset(args_fname, args)
-    val_dataloader = DataLoader(
-        val_dataset,
-        batch_size=args.batch_size,
-        shuffle=True,
-        num_workers=args.num_workers
-        ) 
+    
     model = ShapeCompletionModel(
         agg_args=args.agg_args,
         unet_args=args.unet_args,
@@ -121,12 +184,39 @@ def run(args):
     assert os.path.exists(model_fname), f"Model file {model_fname} does not exist"
     print(f"Loading model from {model_fname}")
     model.load_state_dict(torch.load(model_fname))
-    
+
+    if args.eval_sam:
+        print(f"Loading SAM model {args.sam_result_dir}")
+        sam_result_dir = join(
+            args.eval_output_dir, 
+            args.sam_result_dir, 
+        )
+        assert os.path.exists(sam_result_dir), f"Model file {sam_result_dir} does not exist"
+        lookup = join(sam_result_dir, args.obj_type, args.obj_folder, args.loop_dir)
+        folders = natsorted(glob(lookup))
+        print(f"Found {len(folders)} folders from {lookup}")
+        for folder in folders:
+            print(f"Running on {folder}")
+            results = run_on_seg_data(model, folder, merge_raw_pcd=False)
+            for _, save_fname, vertices, faces in results: 
+                mesh = trimesh.Trimesh(vertices, faces)
+                mesh.export(save_fname)
+        return 
+
+    val_dataset, skip_extents, use_max_extents = create_dataset(args_fname, args)
+    val_dataloader = DataLoader(
+        val_dataset,
+        batch_size=args.batch_size,
+        shuffle=False,
+        num_workers=args.num_workers
+        ) 
     voxel_size = val_dataset.voxel_size
     if args.wandb:
         run = wandb.init(project="real2code", group="shape", name=f"eval_{args.resume}")
         wandb.config.update(args)
     
+    eval_save_dir = join(args.eval_output_dir, args.resume, f"step_{args.load_step}") 
+    os.makedirs(eval_save_dir, exist_ok=True)     
     all_chamfer = defaultdict(list)
     for i, data in tqdm(
         enumerate(val_dataloader), 
@@ -139,7 +229,22 @@ def run(args):
         extent = data['extent'][0].cpu().numpy()
         
         link_name, obj_folder, obj_type, loop_id = get_link_name(data['mesh_fname'][0])
-        save_fname = join(args.log_dir, args.resume, f"step_{args.load_step}", f"{args.split}_pred_{link_name}.obj")
+        obj_save_dir = join(eval_save_dir, obj_type, obj_folder, loop_id)
+        os.makedirs(obj_save_dir, exist_ok=True)
+
+        pcd_fname = join(obj_save_dir, f"input_{link_name}.ply")
+        if not os.path.exists(pcd_fname):
+            pcd = o3d.geometry.PointCloud()  
+            pcd.points = o3d.utility.Vector3dVector(input[0].cpu().numpy())
+            o3d.io.write_point_cloud(pcd_fname, pcd)
+        raw_pcd_fname = join(obj_save_dir, f"pcd_{link_name}.ply")
+        if not os.path.exists(raw_pcd_fname):
+            pcd = o3d.geometry.PointCloud()
+            raw_pcd = data['raw_pcd'][0]
+            pcd.points = o3d.utility.Vector3dVector(raw_pcd.cpu().numpy())
+            o3d.io.write_point_cloud(raw_pcd_fname, pcd)
+
+        save_fname = join(obj_save_dir, f"pred_{link_name}.obj")
         if os.path.exists(save_fname) and not args.overwrite:
             continue
         pred = model(input, query)
@@ -161,7 +266,9 @@ def run(args):
             mesh_scale = 2
         # add input voxelgrid
         input_voxelgrid = pointclouds_to_voxelgrids(
-            input, resolution=voxel_size, origin=torch.tensor(mesh_origin)[None].to(input.device), scale=torch.tensor(mesh_scale)[None].to(input.device)
+            input, resolution=voxel_size, 
+            origin=torch.tensor(mesh_origin)[None].to(input.device), 
+            scale=torch.tensor(mesh_scale)[None].to(input.device)
         )
         pred_voxelgrid += input_voxelgrid
         verts, faces = voxelgrids_to_trianglemeshes(pred_voxelgrid, iso_value=args.iso_value) # ths is ranged (0, 96)
@@ -197,13 +304,12 @@ def run(args):
         label_vertices = label_vertices @ R.T + center
         label_mesh = trimesh.Trimesh(label_vertices, label_faces)
         
-        if args.save_mesh:
-            label_mesh.export(join(args.log_dir, args.resume, f"step_{args.load_step}", f"{args.split}_label_{link_name}.obj"))
         gt_mesh = trimesh.load(data['mesh_fname'][0]) 
         # rotate gt_mesh around z axis by 90:
         # gt_mesh.apply_transform(trimesh.transformations.rotation_matrix(np.pi/2, [0, 0, 1]))
         if args.save_mesh:
-            gt_mesh.export(join(args.log_dir, args.resume, f"step_{args.load_step}", f"{args.split}_gt_{link_name}.obj")) 
+            label_mesh.export(join(obj_save_dir, f"label_{link_name}.obj"))
+            gt_mesh.export(join(obj_save_dir, f"gt_{link_name}.obj")) 
         # compute chamfer distance 
         chamfer, chamfer_norm = chamfer_distance(gt_mesh, pred_mesh) # gt mesh at front!!!
         # print(f"Chamfer distance: {chamfer}") 
@@ -214,10 +320,14 @@ def run(args):
         obj_dir = "/".join(mesh_name.split("/")[:-2]) 
         code_dir = obj_dir.replace(args.data_dir, args.code_dataset_dir)
         code_fname = join(code_dir, f"obb_info_loop_0.json")
-        with open(code_fname, "r") as f:
-            code_info = json.load(f)['test_code']
-        root_id = code_info.split('root_geom = ')[-1].split('\n')[0]
-        is_static = (link_id == root_id)
+        if not os.path.exists(code_fname):
+            print(f"WARNING! Missing {code_fname}")
+            is_static = False
+        else:
+            with open(code_fname, "r") as f:
+                code_info = json.load(f)['test_code']
+            root_id = code_info.split('root_geom = ')[-1].split('\n')[0]
+            is_static = (link_id == root_id)
         
         mesh_stats = {
                 "link_id": link_id,
@@ -226,7 +336,7 @@ def run(args):
                 "is_static": is_static,
             }
         # save with json
-        json_fname = join(args.log_dir, args.resume, f"step_{args.load_step}", f"{args.split}_stats_{link_name}.json")
+        json_fname = join(obj_save_dir, f"stats_{link_name}.json")
         with open(json_fname, "w") as f:
             json.dump(mesh_stats, f)
         mesh_stats.update({
@@ -281,10 +391,14 @@ def pool_stats(args):
         dataset_kwargs = json.load(f)['dataset_kwargs']
     val_dataset, skip_extents, use_max_extents = create_dataset(args_fname, args)
     all_stats = defaultdict(list)
+    eval_save_dir = join(args.eval_output_dir, args.resume, f"step_{args.load_step}") 
     for i, data in enumerate(val_dataset):
         link_name, obj_folder, obj_type, loop_id = get_link_name(data['mesh_fname'])
-        save_fname = join(args.log_dir, args.resume, f"step_{args.load_step}", f"{args.split}_pred_{link_name}.obj")
-        stats_fname = join(args.log_dir, args.resume, f"step_{args.load_step}", f"{args.split}_stats_{link_name}.json")
+        obj_save_dir = join(eval_save_dir, obj_type, obj_folder, loop_id)
+        os.makedirs(obj_save_dir, exist_ok=True)
+        
+        save_fname = join(obj_save_dir, f"pred_{link_name}.obj")
+        stats_fname = join(obj_save_dir, f"{args.split}_stats_{link_name}.json")
         if not os.path.exists(save_fname) or not os.path.exists(stats_fname):
             print(f"WARNING! Missing {save_fname}")
             continue
@@ -319,7 +433,7 @@ def pool_stats(args):
 if __name__ == "__main__":    
     parser = argparse.ArgumentParser()
     # dataset and loader:
-    parser.add_argument("--data_dir", type=str, default="/local/real/mandi/shape_dataset_v4")
+    parser.add_argument("--data_dir", type=str, default="/store/real/mandi/real2code_shape_dataset_v0")
     parser.add_argument("--batch_size", "-b", type=int, default=1)
     parser.add_argument("--num_input_points", "-i", type=int, default=1024)
     parser.add_argument("--num_query_points", "-q", type=int, default=8000)
@@ -334,10 +448,10 @@ if __name__ == "__main__":
     parser.add_argument("--rot_aug", action="store_true")
     parser.add_argument("--split", type=str, default="test")
     # eval:
-    parser.add_argument("--iso_value", "-iso", type=float, default=0.6)
+    parser.add_argument("--iso_value", "-iso", type=float, default=0.7)
     parser.add_argument("--save_mesh", "-sm", default=True, action="store_true")
-    parser.add_argument("--code_dataset_dir", type=str, default="/local/real/mandi/blender_dataset_v4") # need this for static/mobile part distinction
-
+    parser.add_argument("--code_dataset_dir", type=str, default="/store/real/mandi/real2code_dataset_v0") # need this for static/mobile part distinction
+    parser.add_argument("--eval_output_dir", type=str, default="/store/real/mandi/real2code_eval_v0/")
     # model:
     parser.add_argument("--learning_rate", "-lr", type=float, default=1e-3)
     parser.add_argument("--num_epochs", "-e", type=int, default=100)
@@ -351,13 +465,17 @@ if __name__ == "__main__":
     parser.add_argument("--resume", "-r", type=str, default="v4_shiftidx_query10000_inp2048_qr0.3")
     parser.add_argument("--load_step", "-ls", type=int, default=95000)
     # logging:
-    parser.add_argument("--log_dir", "-ld", type=str, default="/local/real/mandi/shape_models/")
+    parser.add_argument("--log_dir", "-ld", type=str, default="/store/real/mandi/real2code_shape_models/")
     parser.add_argument("--log_interval", "-log", type=int, default=50)
     parser.add_argument("--save_interval", "-save", type=int, default=5000)
     parser.add_argument("--wandb", action="store_true")
     parser.add_argument("--run_name", "-rn", type=str, default="test")
-    parser.add_argument("--overwrite", "-o", action="store_true")
-    parser.add_argument("--vis_interval", "-vis", type=int, default=500)
+    parser.add_argument("--overwrite", "-o", action="store_true") 
+
+    # load sam results
+    parser.add_argument('--eval_sam', '-es', action="store_true")
+    # contain both run name and epoch
+    parser.add_argument('--sam_result_dir', default="scissors_eyeglasses_only_pointsTrue_lr0.001_bs24_ac24_11-30_00-23/ckpt_epoch_110")
 
     parser.add_argument("--pool_stats", "-p", action="store_true")
     args = parser.parse_args()

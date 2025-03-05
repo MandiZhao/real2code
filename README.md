@@ -4,7 +4,7 @@
 [Arxiv](https://arxiv.org/abs/2406.08474) | [Website](https://real2code.github.io/)
 
  
-<img src="real2code-teaser-pic.jpg" alt="teaser" width="800"/>
+<img src="real2code-teaser.jpg" alt="teaser" width="800"/>
 
 ## Installation
 Use conda environment with Python 3.9, and install packages from the provided `.yaml` file
@@ -14,30 +14,16 @@ conda activate real2code
 conda env update --file environment.yml --prune
 ```
 
-
 ## Code Overview
-### Data Generation & Processing  
-1. Download the pre-processed version of PartNet-Mobility data from [UMPNet](https://github.com/real-stanford/umpnet) and from the [Sapien official website](https://sapien.ucsd.edu/browse) (this website has web-based interactive visualization for the objects). 
-Note that the objects were manually inspected and de-duplicated: for Eyeglasses category, 11 objects from the original site was removed, and results in 54 objects in total, from which we selected 5 test objects.
+This repo encapsulates multiple sub-modules of the Real2Code pipeline. 
 
-2. Use `blender_render.py` to process and render RGBD images from [PartNet-Mobility](https://sapien.ucsd.edu/browse) data. 
-  - If you see error `xcb_connection_has_error() returned true`, try unsetting `DISPLAY` variable (e.g. `export DISPLAY=`).
+- **Dataset**: Overall, all modules use the same synthetic dataset of RGBD images, part-level meshes, and code snippets for joint structures for each object. We have released this dataset [here](https://drive.google.com/drive/folders/1rkUP7NBRQX5h6ixJr9SvX0Vh3fhj1YqO?usp=drive_link), and provide processing & rendering utility scripts in `data_utils/` if you want to generate your own data. 
+- **Part-level 2D-Segmentation and 3D Shape Completion**: With the same set of objects, we fine-tune a 2D SAM model for part-level segmentation and train a PointNet-based model for 3D shape completion. More details on each sub-module is further documented in the READMEs in [part segmentation](https://github.com/MandiZhao/real2code/tree/main/part_segmentation) and [shape completion](https://github.com/MandiZhao/real2code/tree/main/shape_complete). 
+- **LLM Fine-tuning**: We fine-tune a CodeLlama model on the code representations of our articulated objects. See [this fork](https://github.com/MandiZhao/open_flamingo) for LLM fine-tuning script. 
 
-3. Use `preprocess_data.py` to generate OBB-relative MJCF code data from the raw URDFs for LLM fine-tuning.  
 
 See `data_utils/` for detailed implementations of the helper functions. 
 
-### Kinematics-Aware SAM Fine-tuning 
-See `image_seg/`
-Example commands to start fine-tuning:
-```
-cd image_seg 
-DATADIR=xxx # your data path
-python tune_sam.py --blender --run_name sam_v2 --wandb --data_dir $DATADIR --points --prompts_per_mask 16 --lr 1e-3 --wandb --fc_weight 1
-```
-
-### Shape Completion 
-See `shape_complete/`, we use Blender-rendered RGBD images to generate partially-observable point clouds inputs; `kaolin` for processing ground-truth mesh to generate occupancy label grids. 
 
 ### LLM fine-tuning
 We use a custom fork of Open-Flamingo: https://github.com/mlfoundations/open_flamingo. More details avaliable soon.

@@ -327,7 +327,9 @@ def sample_points_eval(
     for i in range(num_batchs):
         point_coords = grid_coords[i*num_masks_per_batch:(i+1)*num_masks_per_batch]
         batch_results = eval_model_on_points(
-            point_coords, labels, image_embeddings, model, original_size=original_size, device=device, 
+            point_coords, labels, image_embeddings, model, 
+            original_size=original_size, 
+            device=device, 
             pad_mask_size=pad_mask_size,
         ) 
         all_outputs.append(
@@ -399,7 +401,8 @@ def get_one_tsdf(
             rgb = cv2.resize(rgb, (w, h))
         rgbd = o3d.geometry.RGBDImage.create_from_color_and_depth(
             o3d.geometry.Image(rgb), o3d.geometry.Image(depth), 
-            depth_trunc=3, depth_scale=1, convert_rgb_to_intensity=False,
+            depth_trunc=10, # set this to high!!!
+            depth_scale=1, convert_rgb_to_intensity=False,
         )
         intrinsics = o3d.camera.PinholeCameraIntrinsic()
         intrinsics.set_intrinsics(
@@ -609,7 +612,8 @@ def sample_3d_eval(
                 coords_flip[:, 0] = point_coords[:, 1]
                 coords_flip[:, 1] = point_coords[:, 0] 
                 batch_results = eval_model_on_points(
-                    coords_flip, img_label, image_embeddings, model, sam_mask_size, device, input_size, 
+                    coords_flip, img_label, image_embeddings, 
+                    model, sam_mask_size, device, input_size, 
                     pad_mask_size=pad_mask_size
                 )
                 # these mask results are again sometimes vertical 

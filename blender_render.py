@@ -57,6 +57,8 @@ RENDER_NORMALS = False
 CUSTOM_CAMERA_DIST_HEIGHT={
     "Eyeglasses": [2.8, 0.85],
     "Scissors": [3.5, 1.5],
+    "Microwave": [4.5, 0.5],
+    "Door": [4.2, 0.5],
 }
   
 from mathutils import Euler
@@ -413,11 +415,12 @@ def process_folder(args, folder):
     if len(folder.split('/')) > 1:
         folder = folder.split('/')[-1]
     folder_id = int(folder)
+    lookup = join(args.data_dir, args.split, "*", folder, args.input_urdf)
     fname = glob(
-        join(args.data_dir, args.split, "*", folder, args.input_urdf)
+        lookup
     )
     if len(fname) == 0:
-        print(f'file {fname} does not exist')
+        print(f'file {lookup} does not exist')
         return  
     fname = fname[0]
     obj_type = fname.split('/')[-3]
@@ -578,7 +581,7 @@ def process_folder(args, folder):
 
 if __name__ == "__main__": 
     parser = argparse.ArgumentParser()
-    parser.add_argument("--data_dir", default="/local/real/mandi/mobility_dataset_v2")
+    parser.add_argument("--data_dir", default="/store/real/mandi/mobility_dataset_v2")
     parser.add_argument('--out_dir', type=str, default="/local/real/mandi/blender_dataset_v5")
     parser.add_argument('--split', type=str, default="test") 
     parser.add_argument('--folder', type=str, default="46172") 

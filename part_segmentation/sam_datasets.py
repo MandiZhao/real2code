@@ -141,11 +141,7 @@ class SamH5Dataset(Dataset):
         obj_to_nmask = dict()
         object_ids = dict()
         total_objs = 0
-        is_old = 'blender_dataset_v0' in root_dir  or "blender_dataset_v1" in root_dir 
-        if is_train and not is_old:
-            root_dir = join(root_dir, 'train')
-        elif not is_train and not is_old:
-            root_dir = join(root_dir, 'test')
+        root_dir = join(root_dir, "train" if is_train else "test")
         for obj_type in natsorted(os.listdir(root_dir)):
             if lookup_obj_type != "*" and obj_type != lookup_obj_type:
                 continue 
@@ -201,8 +197,7 @@ class SamH5Dataset(Dataset):
                 else:
                     obj_folders = obj_folder_keys[num_objs:]
                 
-                if not is_old: # dataset already split into train/test
-                    obj_folders = obj_folder_keys
+                obj_folders = obj_folder_keys
                 
 
                 for obj_folder in obj_folders:
